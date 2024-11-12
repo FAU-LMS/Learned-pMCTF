@@ -1,8 +1,6 @@
-
-
 # Variable Rate Learned Wavelet Video Coding with Temporal Layer Adaptivity
 
-The paper is submitted to ICASSP 2025 and currently under review. The code will be published if accepted.
+The paper is submitted to ICASSP 2025 and currently under review.
 
 This repository contains training and inference code for the paper "Variable rate learned wavelet video coding with temporal layer adaptivity". 
 The paper is available on [Arxiv](https://arxiv.org/abs/2410.15873).
@@ -54,7 +52,7 @@ Run the following command for evaluation:
 - --write_stream: 1 (bitstream writing enabled)
 
 ### Models
-Download pretrained models here:
+Download pretrained models here: [Google Drive](https://drive.google.com/drive/folders/1-Opac8I7bH5JZfXRsXzYbyhovQ5mTXtj?usp=drive_link)
 ## Acknowledgement 
 
 - The implementation is based on [CompressAI](https://github.com/InterDigitalInc/CompressAI) and [DCVC-DC](https://github.com/microsoft/DCVC/tree/main/DCVC-DC). <br>
