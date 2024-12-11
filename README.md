@@ -12,7 +12,6 @@ Setup conda environment and install Pytorch:
 conda create -n $ENV_NAME python=3.8
 conda activate $ENV_NAME
 
-conda install pytorch==1.10.1 torchvision==0.11.2 torcaudio==.9.0 cudatoolkit=11.1.1 -c pytorch
 pip install torch==1.10.1+cu111 torchvision==0.11.2+cu111 torchaudio==0.10.1 -f https://download.pytorch.org/whl/cu111/torch_stable.html
 pip install -r requirements.txt
 ```
