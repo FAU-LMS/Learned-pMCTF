@@ -243,7 +243,7 @@ class pWave(nn.Module):
     def forward_one_channel(self, x, q_scale=None, q_scale_ll=None):
         if q_scale is None:
             q_scale = self.QP[-1]
-            q_scale_ll = self.QP_ll#[-1]
+            q_scale_ll = self.QP_ll[-1]
         # ANALYSIS TRANSFORM: forward wavelet transform
         y = self.encode(x)
 
@@ -315,7 +315,7 @@ class pWave(nn.Module):
         # compute approxtimation of forward pass (skip actual coding of subbands)
         if q_scale is None:
             q_scale = self.QP[-1]
-            q_scale_ll = self.QP_ll
+            q_scale_ll = self.QP_ll[-1]
         # ANALYSIS TRANSFORM: forward wavelet transform
         y = self.encode(x)
 
@@ -382,7 +382,7 @@ class pWave(nn.Module):
         _, num_channels, height, width = sideinfo
         if q_index is None:
             q_scale = self.QP[-1]
-            q_scale_ll = self.QP_ll #[-1]
+            q_scale_ll = self.QP_ll[-1]
         else:
             q_scale = self.get_curr_q(self.QP, q_index)
             q_scale_ll = self.get_curr_q(self.QP_ll, q_index)
@@ -467,7 +467,7 @@ class pWave(nn.Module):
     def decompress(self, file_name, padding=64, q_index=None, qp_scale=None):
         if q_index is None:
             q_scale = self.QP[-1]
-            q_scale_ll = self.QP_ll #[-1]
+            q_scale_ll = self.QP_ll[-1]
         else:
             q_scale = self.get_curr_q(self.QP, q_index)
             q_scale_ll = self.get_curr_q(self.QP_ll, q_index)

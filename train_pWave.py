@@ -134,7 +134,7 @@ def test_epoch(epoch: int,
             if not model.lossy:
                 d = torch.round(d)
 
-            out_net = model(d)
+            out_net = model(d, q_index)
             out_criterion = model.compute_loss(out_net, d, cur_lmbda)
 
             if not losses:
