@@ -1,9 +1,7 @@
 # Variable Rate Learned Wavelet Video Coding with Temporal Layer Adaptivity
 
-The paper is submitted to ICASSP 2025 and currently under review.
-
-This repository contains training and inference code for the paper "Variable rate learned wavelet video coding with temporal layer adaptivity". 
-The paper is available on [Arxiv](https://arxiv.org/abs/2410.15873).
+This repository contains training and inference code for the paper "Variable rate learned wavelet video coding using temporal layer adaptivity". 
+The paper is accepted for ICIP2025 and available on [Arxiv](https://arxiv.org/abs/2410.15873).
 
 ## Installation
 
@@ -44,12 +42,13 @@ For training the video model, a pretrained image coder and a checkpoint for the 
 For evaluation, setup path to UVG data set in [configs/dataset_config.json](configs/dataset_config.json). The sequences in YUV format are available [here](https://ultravideo.fi/dataset.html).
 Run the following command for evaluation:
 ```bash
- python test_pMCTF_flex.py --model_path checkpoints/pMCTF-L/state_epoch17.pth.tar --test_config ./configs/dataset_config.json --cuda 1 --write_stream 1 --force_intra_period 8 --force_frame_num 96  --ds_name UVG --skip_decoding --verbose 3 --two_stage_me --num_me_stages 3 --q_index_num 6
+ python test_pMCTF_flex.py --model_path checkpoints/pMCTF-L/pMCTF_L_epoch28.pth.tar --test_config ./configs/dataset_config.json --cuda 1 --write_stream 1 --force_intra_period 16 --force_frame_num 96  --ds_name UVG --skip_decoding --verbose 3 --two_stage_me --num_me_stages 4 --q_index_num 6
 ```
-- --force_intra_period: 8 (test GOP size (2, 4, 8, 16, ...))
+- --force_intra_period: 16 (test GOP size (2, 4, 8, 16, ...))
 - --q_index_num: 6 (evaluate 6 rate-distortion points within training quantization index range)
 - --write_stream: 1 (bitstream writing enabled)
 
+test_pMCTF_CA.py can be called using the same parameters as above for a content-adaptive GOP choice, where _force_intra_period_ is the maximum GOP size.
 ### Models
 Download pretrained models here: [Google Drive](https://drive.google.com/drive/folders/1-Opac8I7bH5JZfXRsXzYbyhovQ5mTXtj?usp=drive_link)
 ## Acknowledgement 
@@ -63,7 +62,7 @@ models and datasets, and cite this project as:
 
 ```bash
 @InProceedings{Meyer2024,
-	title={Variable Rate Learned Wavelet Video Coding with Temporal Layer Adaptivity},
+	title={Variable Rate Learned Wavelet Video Coding using Temporal Layer Adaptivity},
 	author={Anna Meyer and Andr{\'e} Kaup},
 	year={2024},
 	journal={arXiv preprint arXiv:2410.15873},

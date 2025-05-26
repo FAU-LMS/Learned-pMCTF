@@ -63,7 +63,7 @@ def dump_json(obj, fid, float_digits=-1, **kwargs):
 
 
 def generate_log_json(frame_num, frame_types, bits, bpp_mv, psnrs, rgb_psnrs, ssims,
-                      frame_pixel_num, test_time):
+                      frame_pixel_num, test_time, gop_choice=None, ds_choice=None, tested_opts=None):
     cur_ave_i_frame_bit = 0
     cur_ave_i_frame_psnr = 0
     cur_ave_i_frame_psnr_rgb = 0
@@ -119,6 +119,10 @@ def generate_log_json(frame_num, frame_types, bits, bpp_mv, psnrs, rgb_psnrs, ss
     log_result['frame_msssim'] = ssims
     log_result['frame_type'] = frame_types
     log_result['test_time'] = test_time
+    if gop_choice is not None and ds_choice is not None:
+        log_result["gop_choice"] = gop_choice
+        log_result["ds_choice"] = ds_choice
+        log_result["tested_opts"] = tested_opts
     if cur_p_frame_num > 0:
         total_p_pixel_num = cur_p_frame_num * frame_pixel_num
         log_result['ave_p_frame_bpp'] = cur_ave_p_frame_bit / total_p_pixel_num
@@ -144,6 +148,9 @@ def generate_log_json(frame_num, frame_types, bits, bpp_mv, psnrs, rgb_psnrs, ss
     log_result['ave_all_frame_psnr_rgb'] = (cur_ave_i_frame_psnr_rgb + cur_ave_p_frame_psnr_rgb + cur_ave_b_frame_psnr_rgb) / frame_num
     log_result['ave_all_frame_msssim'] = (cur_ave_i_frame_msssim + cur_ave_p_frame_msssim + cur_ave_b_frame_msssim) / \
         frame_num
+
+    if tested_opts is not None:
+        log_result["ave_tested_opts"] = sum(tested_opts)/len(tested_opts)
 
     return log_result
 

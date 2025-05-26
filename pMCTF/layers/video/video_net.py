@@ -3,8 +3,8 @@ from torch import nn
 import torch.nn.functional as F
 from torch.autograd import Function
 
-from pMCTF.layers.video.layers import subpel_conv1x1, conv3x3,\
-    ResidualBlockWithStride, ResidualBlockUpsample, DepthConvBlock
+from pMCTF.layers.video.layers import subpel_conv1x1,\
+    ResidualBlockWithStride, ResidualBlockUpsample, DepthConvBlock, DepthConvBlock4
 
 
 backward_grid = [{} for _ in range(9)]    # 0~7 for GPU, -1 for CPU
@@ -131,18 +131,21 @@ class MvEnc(nn.Module):
         self.enc_2 = ResidualBlockWithStride(channel, channel, stride=2, inplace=inplace)
 
         self.adaptor_0 = DepthConvBlock(channel, channel, inplace=inplace)
-        # self.adaptor_1 = DepthConvBlock(channel * 2, channel, inplace=inplace)
+        self.adaptor_1 = DepthConvBlock(channel * 2, channel, inplace=inplace)
         self.enc_3 = nn.Sequential(
             ResidualBlockWithStride(channel, channel, stride=2, inplace=inplace),
             DepthConvBlock(channel, channel, inplace=inplace),
             nn.Conv2d(channel, channel, 3, stride=2, padding=1),
         )
 
-    def forward(self, x, quant_step):
+    def forward(self, x, context, quant_step):
         out = self.enc_1(x)
         out = out * quant_step
         out = self.enc_2(out)
-        out = self.adaptor_0(out)
+        if context is None:
+            out = self.adaptor_0(out)
+        else:
+            out = self.adaptor_1(torch.cat((out, context), dim=1))
         return self.enc_3(out)
 
 
@@ -167,37 +170,24 @@ class MvDec(nn.Module):
         out = self.dec_2(feature)
         out = out * quant_step
         mv = self.dec_3(out)
-        return mv  # , feature
+        return mv , feature
 
 
-def get_hyper_enc_model(y_channel, z_channel):
+def get_hyper_enc_model(channel_N, channel_mv):
     enc = nn.Sequential(
-        conv3x3(y_channel, z_channel),
-        nn.LeakyReLU(),
-        conv3x3(z_channel, z_channel),
-        nn.LeakyReLU(),
-        conv3x3(z_channel, z_channel, stride=2),
-        nn.LeakyReLU(),
-        conv3x3(z_channel, z_channel),
-        nn.LeakyReLU(),
-        conv3x3(z_channel, z_channel, stride=2),
-    )
+            DepthConvBlock4(channel_mv, channel_N),
+            nn.Conv2d(channel_N, channel_N, 3, stride=2, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(channel_N, channel_N, 3, stride=2, padding=1),
+        )
     return enc
 
-
-def get_hyper_dec_model(y_channel, z_channel):
+def get_hyper_dec_model(channel_N, channel_mv):
     dec = nn.Sequential(
-        conv3x3(z_channel, y_channel),
-        nn.LeakyReLU(),
-        subpel_conv1x1(y_channel, y_channel, 2),
-        nn.LeakyReLU(),
-        conv3x3(y_channel, y_channel * 3 // 2),
-        nn.LeakyReLU(),
-        subpel_conv1x1(y_channel * 3 // 2, y_channel * 3 // 2, 2),
-        nn.LeakyReLU(),
-        conv3x3(y_channel * 3 // 2, y_channel * 2),
-    )
-
+                ResidualBlockUpsample(channel_N, channel_N, 2),
+                ResidualBlockUpsample(channel_N, channel_N, 2),
+                DepthConvBlock4(channel_N, channel_mv),
+            )
     return dec
 
 

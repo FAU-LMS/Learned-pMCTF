@@ -76,7 +76,7 @@ def np_image_to_tensor(img):
 def save_torch_image(img, save_path):
     img = img.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
     img = np.clip(np.rint(img), 0, 255).astype(np.uint8)
-    Image.fromarray(img).save(save_path)
+    Image.fromarray(img.squeeze()).save(save_path)
 
 
 def PSNR(input1, input2):
@@ -138,6 +138,7 @@ def run_test(video_net, args, device):
             for stage_idx in range(num_stages_tmp):
                 num_frames = num_frames // 2
                 hp_bpp_cur_stage = []
+                dpb = {"mv_feature": None, "ref_mv_y": None}
                 for group_idx in range(num_frames):
                     group_step = 2**stage_idx
                     frame_idx_gop = group_idx*2*group_step
@@ -147,8 +148,8 @@ def run_test(video_net, args, device):
 
                     if stage_idx == 0:
                         # first temporal decomposition level: read original frames
-                        ycbcr_ref = src_reader.read_one_frame(src_format="rgb")
-                        ycbcr_cur = src_reader.read_one_frame(src_format="rgb")
+                        ycbcr_ref = src_reader.read_one_frame()
+                        ycbcr_cur = src_reader.read_one_frame()
                         ycbcr_ref = [np_image_to_tensor(curr) for curr in ycbcr_ref]
                         ycbcr_cur = [np_image_to_tensor(curr)for curr in ycbcr_cur]
                         y_ref, cb_ref, cr_ref = ycbcr_ref
@@ -157,10 +158,10 @@ def run_test(video_net, args, device):
                         y_cur, cb_cur, cr_cur = ycbcr_cur
                         chroma_cur = torch.cat((cb_cur, cr_cur), dim=0)
 
-                        y_ref = y_ref.unsqueeze(0)
-                        y_cur = y_cur.unsqueeze(0)
-                        chroma_ref = chroma_ref.unsqueeze(1)
-                        chroma_cur = chroma_cur.unsqueeze(1)
+                        y_ref = y_ref.unsqueeze(0).to(device)
+                        y_cur = y_cur.unsqueeze(0).to(device)
+                        chroma_ref = chroma_ref.unsqueeze(1).to(device)
+                        chroma_cur = chroma_cur.unsqueeze(1).to(device)
 
                         frames_orig[frame_idx_gop] = [y_ref, chroma_ref]
                         frames_orig[frame_idx_gop+group_step] = [y_cur, chroma_cur]
@@ -218,10 +219,13 @@ def run_test(video_net, args, device):
                                                         code_lt=code_lt,
                                                         psize=psize,
                                                         skip_decoding=args["skip_decoding"],
+                                                        dpb=dpb,
                                                         q_index=q_index)
 
-                    frames_coded[frame_idx_gop] = [result["L_t"].to("cpu"), result["L_tc"].to("cpu"), None]
-                    frames_coded[frame_idx_gop+group_step] = [result["H_t"].to("cpu"), result["H_tc"].to("cpu"), result["mv_hat"].to("cpu")]
+                    frames_coded[frame_idx_gop] = [result["L_t"], result["L_tc"], None]
+                    frames_coded[frame_idx_gop+group_step] = [result["H_t"], result["H_tc"], result["mv_hat"]]
+
+                    dpb= result["dpb"]
 
                     frame_end_time = time.time()
 
@@ -280,16 +284,11 @@ def run_test(video_net, args, device):
 
                     me_num = min(video_net.num_me_stages-1, stage_idx)
 
-                    L_t = L_t.to(device)
-                    H_t = H_t.to(device)
-                    mv_hat = mv_hat.to(device)
                     ref_frame, cur_frame = video_net.inverse_MCTF(L_t, H_t, mv_hat, stage_idx=me_num)
-                    L_tc = L_tc.to(device)
-                    H_tc = H_tc.to(device)
                     ref_frame_c, cur_frame_c = video_net.inverse_MCTF(L_tc, H_tc, mv_hat, stage_idx=me_num,
                                                                       downscale=True)
-                    frames_coded[frame_idx_gop] = [ref_frame.to("cpu"), ref_frame_c.to("cpu"), None]
-                    frames_coded[frame_idx_gop + group_step] = [cur_frame.to("cpu"), cur_frame_c.to("cpu"), None]
+                    frames_coded[frame_idx_gop] = [ref_frame, ref_frame_c, None]
+                    frames_coded[frame_idx_gop + group_step] = [cur_frame, cur_frame_c, None]
 
             # CALCULATE PSNR, MS-SSIM
             for frame_idx_gop in range(gop_size):
@@ -323,7 +322,7 @@ def run_test(video_net, args, device):
                 else:
                     msssim = 0
 
-                psnrs[frame_idx] = (6.0 * y_psnr_cur + cb_psnr_cur + cr_psnr_cur) / 6.0
+                psnrs[frame_idx] = (6.0 * y_psnr_cur + cb_psnr_cur + cr_psnr_cur) / 8.0
                 rgb_psnrs[frame_idx] = rgb_psnr
                 msssims[frame_idx] = msssim
 
@@ -361,8 +360,7 @@ def run_test(video_net, args, device):
 def encode_one(args, device):
     p_state_dict = get_state_dict(args['model_path'])
 
-    video_net = pMCTF(lossy=not args["lossless"], two_stage_me=args["two_stage_me"],
-                      num_me_stages=args["num_me_stages"])
+    video_net = pMCTF(lossy=not args["lossless"], num_me_stages=args["num_me_stages"])
 
     video_net.load_state_dict(p_state_dict, strict=True)
     video_net = video_net.to(device)

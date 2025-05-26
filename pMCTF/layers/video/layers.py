@@ -151,6 +151,22 @@ class ConvFFN(nn.Module):
         identity = x
         return identity + self.conv(x)
 
+class ConvFFN3(nn.Module):
+    def __init__(self, in_ch, inplace=False):
+        super().__init__()
+        expansion_factor = 2
+        internal_ch = in_ch * expansion_factor
+        self.conv = nn.Conv2d(in_ch, internal_ch * 2, 1)
+        self.conv_out = nn.Conv2d(internal_ch, in_ch, 1)
+        self.relu1 = nn.LeakyReLU(negative_slope=0.1, inplace=inplace)
+        self.relu2 = nn.LeakyReLU(negative_slope=0.01, inplace=inplace)
+
+    def forward(self, x):
+        identity = x
+        x1, x2 = self.conv(x).chunk(2, 1)
+        out = self.relu1(x1) + self.relu2(x2)
+        return identity + self.conv_out(out)
+
 
 class DepthConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch, depth_kernel=3, stride=1,
@@ -164,3 +180,14 @@ class DepthConvBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+
+class DepthConvBlock4(nn.Module):
+    def __init__(self, in_ch, out_ch, slope_depth_conv=0.01, inplace=False):
+        super().__init__()
+        self.block = nn.Sequential(
+            DepthConv(in_ch, out_ch, slope=slope_depth_conv, inplace=inplace),
+            ConvFFN3(out_ch, inplace=inplace),
+        )
+
+    def forward(self, x):
+        return self.block(x)

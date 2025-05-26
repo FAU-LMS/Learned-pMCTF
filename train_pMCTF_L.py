@@ -159,6 +159,7 @@ def train(video_net: nn.Module,
             me_num = min(video_net.num_me_stages - 1, max_interval - 1)
 
         for stage_idx in range(num_stages_tmp):
+            dpb = {"mv_feature": None, "ref_mv_y": None}
             # temporal decomposition level
             for group_idx in range(num_frames_stage):
                 group_step = 2 ** stage_idx
@@ -172,8 +173,9 @@ def train(video_net: nn.Module,
                     ref_frame, cur_frame = frames_coded[frame_idx], frames_coded[frame_idx + group_step]
 
                 # code temporal Lowpass only in last temporal stage
-                result = video_net(ref_frame, cur_frame, q_index,
+                result = video_net(ref_frame, cur_frame, q_index, dpb=dpb,
                                    code_lt=code_lt, stage_idx=me_num+stage_idx)
+                dpb = result["dpb"]
 
                 frames_coded[frame_idx] = result["L_t"]
                 if code_lt:
@@ -205,7 +207,6 @@ def train(video_net: nn.Module,
                 frames_coded[frame_idx] = ref_frame#.detach()
                 frames_coded[frame_idx + group_step] = cur_frame#.detach()
 
-        # loss_frames = [0, 2] if random_interval and num_frames == 4 else range(num_frames)
         rd_loss = 0
         for frame_idx in range(num_frames):
             # get loss
@@ -287,7 +288,7 @@ def parse_args(argv):
     parser.add_argument("-d", "--dataset", type=str, required=True, help="Training dataset path")
     parser.add_argument('--iframe_path', type=str, required=True,
                         help='Path to I frame model pWave++')
-    parser.add_argument('--config', type=str, default="configs/train_mctf_gop8_4frames.json",
+    parser.add_argument('--config', type=str, default="configs/train_mctf_gop16.json",
                         help='path to config helper file')
     parser.add_argument('--checkpoint', default=None,
                         help='load pretrained model from checkpoint path')
@@ -362,7 +363,6 @@ def main(argv):
     assert sum(args.num_epochs_list) == args.total_epochs
     stage_num = 0
     stage_duration = args.num_epochs_list[stage_num]
-    num_frames = args.num_frame_list[stage_num]
     epochs_cur_stage = 0
 
     video_net.make_inter_trainable()
@@ -398,6 +398,9 @@ def main(argv):
                     logger.info(f"START TRAINING IN STAGE {stage_num+1}")
                     stage_duration = args.num_epochs_list[stage_num]
                     num_frames = args.num_frame_list[stage_num]
+                    if num_frames > 7:
+                        # switch to vimeo-32 for GOP 8 and 16
+                        train_loader = load_datasets(args, device, logger, num_frames)
                     train_loader.dataset.update_num_frames(num_frames, logger)
 
                     if args.frame_interval[stage_num] > 1:
@@ -418,6 +421,12 @@ def main(argv):
                     if stage_num == 5 and args.parts[stage_num] == "All":
                         logger.info(f"ENABLE TEMPORAL LAYER ADAPTIVE QUALITY SCALING")
                         video_net.quant_stage = True
+                    if num_frames > 8 and num_frames != args.num_frame_list[stage_num - 1]:
+                        logger.info(f"Add another ME Stage for {num_frames} frames")
+                        me_stage = int(math.log2(num_frames))
+                        # initalize new MCTF stage by last available stage
+                        video_net.make_mctf_trainable(start_idx=me_stage - 1, copy_idx=me_stage - 2)
+                        video_net.make_all_trainable()
                     if (args.parts[stage_num] == args.parts[stage_num-1] or epochs_cur_stage > 0) \
                         and "optimizer" in checkpoint and start_epoch < 15:
                         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -445,6 +454,16 @@ def main(argv):
             epochs_cur_stage = 0
             stage_num += 1
             stage_duration = args.num_epochs_list[stage_num]
+
+            num_frames = args.num_frame_list[stage_num]
+            if num_frames > 7:
+                # switch to vimeo-32 for GOP 8 and 16
+                train_loader = load_datasets(args, device, logger, num_frames)
+            train_loader.dataset.update_num_frames(num_frames, logger)
+
+            if args.frame_interval[stage_num] > 1:
+                train_loader.dataset.update_interval(args.frame_interval[stage_num], logger)
+
             logger.info(f"ENTERING STAGE {stage_num+1}")
 
             if stage_num == 2 and args.parts[stage_num] == "All":
@@ -471,11 +490,12 @@ def main(argv):
                 logger.info(f"ENABLE TEMPORAL LAYER ADAPTIVE QUALITY SCALING")
                 video_net.quant_stage = True
 
-            num_frames = args.num_frame_list[stage_num]
-            train_loader.dataset.update_num_frames(num_frames, logger)
-
-            if args.frame_interval[stage_num] > 1:
-                train_loader.dataset.update_interval(args.frame_interval[stage_num], logger)
+            if num_frames > 8 and num_frames != args.num_frame_list[stage_num-1]:
+                logger.info(f"Add another ME Stage for {num_frames} frames")
+                me_stage = int(math.log2(num_frames))
+                # initalize new MCTF stage by last available stage
+                video_net.make_mctf_trainable(start_idx=me_stage - 1, copy_idx=me_stage - 2)
+                video_net.make_all_trainable()
 
             logger.info(f"Update learning rate to {args.lr_list[stage_num]}")
             adjust_learning_rate(optimizer, args.lr_list[stage_num])
@@ -485,7 +505,9 @@ def main(argv):
                             args.train_lmbda_list,
                             stage_num,
                             train_loader,
-                            epoch, global_step, args.num_frame_list[stage_num], args.frame_interval[stage_num],
+                            epoch, global_step,
+                            args.num_frame_list[stage_num],
+                            args.frame_interval[stage_num],
                             logger)
 
         epochs_cur_stage += 1

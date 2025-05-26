@@ -12,7 +12,7 @@ from timm.models.layers import trunc_normal_
 from pMCTF.layers import RoundNoGradient
 
 from pMCTF.layers.video.video_net import ME_Spynet, flow_warp, bilineardownsacling, \
-    get_hyper_enc_model, get_hyper_dec_model,  bilinearupsacling, MvDec, MvEnc
+    get_hyper_enc_model, get_hyper_dec_model, bilinearupsacling, MvDec, MvEnc
 from pMCTF.layers.video.wavelet_transform_temporal_mctf import TemporalLifting
 
 from pMCTF.utils.stream_helper import get_downsampled_shape, encode_p, decode_p, \
@@ -36,7 +36,7 @@ class pMCTF(nn.Module):
                  bitdepth=8,
                  decomp_levels=4,
                  lossy=True,
-                 two_stage_me=False,
+                 two_stage_me=True,
                  num_me_stages=2,
                  quant_stage=True,
                  **kwargs):
@@ -68,10 +68,15 @@ class pMCTF(nn.Module):
         self.mv_decoder = nn.ModuleList([MvDec(2, channel_mv)
                                          for _ in range(num_me_stages)])
 
-        self.mv_hyper_prior_encoder = nn.ModuleList([get_hyper_enc_model(channel_mv, channel_N)
+        self.mv_hyper_prior_encoder = nn.ModuleList([get_hyper_enc_model(channel_N, channel_mv)
                                                      for _ in range(num_me_stages)])
-        self.mv_hyper_prior_decoder = nn.ModuleList([get_hyper_dec_model(channel_mv, channel_N)
+        self.mv_hyper_prior_decoder = nn.ModuleList([get_hyper_dec_model(channel_N, channel_mv)
                                                      for _ in range(num_me_stages)])
+
+        self.mv_y_prior_fusion_adaptor_0 = nn.ModuleList([DepthConvBlock(channel_mv * 1, channel_mv * 2)
+                                                          for _ in range(num_me_stages)])
+        self.mv_y_prior_fusion_adaptor_1 = nn.ModuleList([DepthConvBlock(channel_mv * 2, channel_mv * 2)
+                                                          for _ in range(num_me_stages)])
 
         self.mv_y_prior_fusion = nn.ModuleList([nn.Sequential(
             DepthConvBlock(channel_mv * 2, channel_mv * 3),
@@ -111,13 +116,6 @@ class pMCTF(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
         if isinstance(m, (nn.Conv2d, nn.Linear)):
             trunc_normal_(m.weight, std=.02)
             if m.bias is not None:
@@ -141,6 +139,8 @@ class pMCTF(nn.Module):
             self.mv_hyper_prior_encoder[i].load_state_dict(self.mv_hyper_prior_encoder[copy_idx].state_dict())
             self.mv_hyper_prior_decoder[i].load_state_dict(self.mv_hyper_prior_decoder[copy_idx].state_dict())
 
+            self.mv_y_prior_fusion_adaptor_0[i].load_state_dict(self.mv_y_prior_fusion_adaptor_0[copy_idx].state_dict())
+            self.mv_y_prior_fusion_adaptor_1[i].load_state_dict(self.mv_y_prior_fusion_adaptor_1[copy_idx].state_dict())
             self.mv_y_prior_fusion[i].load_state_dict(self.mv_y_prior_fusion[copy_idx].state_dict())
             self.mv_y_spatial_prior[i].load_state_dict(self.mv_y_spatial_prior[copy_idx].state_dict())
 
@@ -174,6 +174,13 @@ class pMCTF(nn.Module):
         for k, p in self.named_parameters():
             if not k.startswith("optic_flow"):
                 p.requires_grad = True
+
+    def make_optic_flow_trainable(self):
+        for k, p in self.named_parameters():
+            if k.startswith("optic_flow"):
+                p.requires_grad = True
+            else:
+                p.requires_grad = False
 
     def fix_wavelet_transform(self):
         for p in self.hp_coder.wavelet_transform.parameters():
@@ -222,7 +229,18 @@ class pMCTF(nn.Module):
             mv_y_q_dec, _ = get_rounded_q(mv_y_q_dec.cpu())
         return mv_y_q_enc, mv_y_q_dec
 
-    def compute_and_code_motion(self, ref_frame, cur_frame, q_index, stage_idx=0, me_downsample=False):
+    def mv_prior_param_decoder(self, mv_z_hat, dpb, me_num):
+        mv_params = self.mv_hyper_prior_decoder[me_num](mv_z_hat)
+        ref_mv_y = dpb["ref_mv_y"]
+        if ref_mv_y is None:
+            mv_params = self.mv_y_prior_fusion_adaptor_0[me_num](mv_params)
+        else:
+            mv_params = torch.cat((mv_params, ref_mv_y), dim=1)
+            mv_params = self.mv_y_prior_fusion_adaptor_1[me_num](mv_params)
+        mv_params = self.mv_y_prior_fusion[me_num](mv_params)
+        return mv_params
+
+    def compute_and_code_motion(self, ref_frame, cur_frame, q_index, dpb, stage_idx=0, me_downsample=1):
         me_num = min(self.num_me_stages-1, stage_idx)
         mv_y_q_enc, mv_y_q_dec = self.get_mv_y_q(q_index, me_num)
         # curr_mv_y_q = self.get_curr_mv_y_q(self.mv_y_q_scale[me_num], me_num)
@@ -241,20 +259,18 @@ class pMCTF(nn.Module):
 
         # ESTIMATE AND ENCODE+DECODE MOTION
         est_mv = self.optic_flow(mv_cur, mv_ref)  # MOTION ESTIMATION
-
-        mv_y = self.mv_encoder[me_num](est_mv, mv_y_q_enc)
+        mv_y = self.mv_encoder[me_num](est_mv, dpb["mv_feature"], mv_y_q_enc)
 
         mv_z = self.mv_hyper_prior_encoder[me_num](mv_y)
         mv_z_hat = self.mv_coder.quant(mv_z)
-        mv_params = self.mv_hyper_prior_decoder[me_num](mv_z_hat)
 
-        mv_params = self.mv_y_prior_fusion[me_num](mv_params)
+        mv_params = self.mv_prior_param_decoder(mv_z_hat, dpb, me_num)
 
         mv_y_res, mv_y_q, mv_y_hat, mv_scales_hat = self.mv_coder.forward_four_part_prior(
             mv_y, mv_params, self.mv_y_spatial_prior_adaptor_1[me_num], self.mv_y_spatial_prior_adaptor_2[me_num],
             self.mv_y_spatial_prior_adaptor_3[me_num], self.mv_y_spatial_prior[me_num])
 
-        mv_hat = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
+        mv_hat, mv_feature  = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
 
         if stage_idx > 0 and me_downsample:
             for i in range(stage_idx):
@@ -275,10 +291,10 @@ class pMCTF(nn.Module):
 
         bpp_mv_y = torch.mean(bpp_mv_y) if self.training else torch.sum(bpp_mv_y)
         bpp_mv_z = torch.mean(bpp_mv_z) if self.training else torch.sum(bpp_mv_z)
-        return mv_hat, bpp_mv_y, bpp_mv_z
+        return mv_hat, {"mv_feature": mv_feature, "mv_y_hat": mv_y_hat}, bpp_mv_y, bpp_mv_z
 
-    def forward(self, ref_frame, cur_frame, q_index, code_lt,  stage_idx=0):
-        return self.forward_one_stage(ref_frame, cur_frame, q_index, code_lt, stage_idx=stage_idx)
+    def forward(self, ref_frame, cur_frame, q_index, code_lt, dpb, stage_idx=0):
+        return self.forward_one_stage(ref_frame, cur_frame, q_index, code_lt, dpb, stage_idx=stage_idx)
 
     def forward_MCTF(self, ref_frame, cur_frame, mv_hat, stage_idx=0):
         me_num = min(self.num_me_stages - 1, stage_idx)
@@ -315,13 +331,13 @@ class pMCTF(nn.Module):
         cur_frame = H_t + pred_frame
         return ref_frame, cur_frame
 
-    def forward_one_stage(self, ref_frame, cur_frame, q_index, code_lt, mv_hat=None, stage_idx=0, me_downsample=False):
-        if not self.training and mv_hat is not None:
-            bpp_mv_y = None
-            bpp_mv_z = None
+    def forward_one_stage(self, ref_frame, cur_frame, q_index, code_lt, dpb, mv_hat=None, stage_idx=0, me_downsample=1):
+        if mv_hat is not None:
+            bpp_mv_y, bpp_mv_z = None, None
+            ref_mv = {"mv_feature": None, "mv_y_hat": None}
             mv_hat = bilineardownsacling(mv_hat) / 2
         else:
-            mv_hat, bpp_mv_y, bpp_mv_z = self.compute_and_code_motion(ref_frame, cur_frame, q_index,
+            mv_hat, ref_mv, bpp_mv_y, bpp_mv_z = self.compute_and_code_motion(ref_frame, cur_frame, q_index, dpb,
                                                                       stage_idx=stage_idx, me_downsample=me_downsample)
 
         L_t, H_t, pred_frame, inv_pred_frame = self.forward_MCTF(ref_frame, cur_frame, mv_hat, stage_idx)
@@ -346,6 +362,7 @@ class pMCTF(nn.Module):
                     "bit_ME": (bpp_mv_y + bpp_mv_z) * (ref_frame.size(2) * ref_frame.size(3)) if bpp_mv_z is not None else None,
                     "mse_H": res_H["mse"],
                     "mv_hat": mv_hat,
+                    "dpb": { "mv_feature": ref_mv["mv_feature"], "ref_mv_y": ref_mv["mv_y_hat"]} ,
                     "H_t": res_H["x_hat"],
                     }
         if code_lt:
@@ -430,13 +447,13 @@ class pMCTF(nn.Module):
         self.lp_coder.update(force)
         self.hp_coder.update(force)
 
-    def compress_mv(self, ref_frame, cur_frame, stage_idx=0, q_index=0, me_downsample=False):
+    def compress_mv(self, ref_frame, cur_frame, dpb, stage_idx=0, q_index=0, me_downsample=1):
         me_num = min(self.num_me_stages - 1, stage_idx)
         mv_y_q_enc, mv_y_q_dec = self.get_mv_y_q(q_index, me_num, inference=True)
 
         # estimate motion on Y only
-        mv_x = cur_frame[0, :, :, :].tile((1, 3, 1, 1)) / self.dynamic_range
-        mv_ref = ref_frame[0, :, :, :].tile((1, 3, 1, 1)) / self.dynamic_range
+        mv_x = cur_frame.tile((1, 3, 1, 1)) / self.dynamic_range
+        mv_ref = ref_frame.tile((1, 3, 1, 1)) / self.dynamic_range
 
         if stage_idx > 0 and me_downsample:
             for i in range(stage_idx):
@@ -445,18 +462,18 @@ class pMCTF(nn.Module):
 
         est_mv = self.optic_flow(mv_x, mv_ref)
 
-        mv_y = self.mv_encoder[me_num](est_mv, mv_y_q_enc)
+        mv_y = self.mv_encoder[me_num](est_mv, dpb["mv_feature"], mv_y_q_enc)
         mv_z = self.mv_hyper_prior_encoder[me_num](mv_y)
         mv_z_hat = torch.round(mv_z)
-        mv_params = self.mv_hyper_prior_decoder[me_num](mv_z_hat)
 
-        mv_params = self.mv_y_prior_fusion[me_num](mv_params)
+        mv_params = self.mv_prior_param_decoder(mv_z_hat, dpb, me_num)
+
         mv_y_q_w_0, mv_y_q_w_1, mv_y_q_w_2, mv_y_q_w_3, \
         mv_scales_w_0, mv_scales_w_1, mv_scales_w_2, mv_scales_w_3, mv_y_hat = self.mv_coder.compress_four_part_prior(
             mv_y, mv_params, self.mv_y_spatial_prior_adaptor_1[me_num], self.mv_y_spatial_prior_adaptor_2[me_num],
             self.mv_y_spatial_prior_adaptor_3[me_num], self.mv_y_spatial_prior[me_num])
 
-        mv_hat = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
+        mv_hat, mv_feature = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
 
         if stage_idx > 0 and me_downsample:
             for i in range(stage_idx):
@@ -475,11 +492,13 @@ class pMCTF(nn.Module):
 
         result = {
             "bit_stream": bit_stream,
-            "mv_hat": mv_hat
+            "mv_hat": mv_hat,
+            "mv_feature": mv_feature,
+            "mv_y_hat": mv_y_hat
         }
         return result
 
-    def decompress_mv(self, string, dtype, height, width, stage_idx=0, q_index=0, me_downsample=False):
+    def decompress_mv(self, string, dtype, height, width, dpb, stage_idx=0, q_index=0, me_downsample=1):
         me_num = min(self.num_me_stages - 1, stage_idx)
         mv_y_q_enc, mv_y_q_dec = self.get_mv_y_q(q_index, me_num, inference=True)
 
@@ -488,16 +507,15 @@ class pMCTF(nn.Module):
         mv_z_size = get_downsampled_shape(height, width, 64)
         mv_z_hat = self.mv_bit_est[me_num].decode_stream(mv_z_size, dtype, device)
         mv_z_hat = mv_z_hat.to(device)
-        mv_params = self.mv_hyper_prior_decoder[me_num](mv_z_hat)
+        mv_params = self.mv_prior_param_decoder(mv_z_hat, dpb, me_num)
 
-        mv_params= self.mv_y_prior_fusion[me_num](mv_params)
         mv_y_hat = self.mv_coder.decompress_four_part_prior(mv_params,
                                                             self.mv_y_spatial_prior_adaptor_1[me_num],
                                                             self.mv_y_spatial_prior_adaptor_2[me_num],
                                                             self.mv_y_spatial_prior_adaptor_3[me_num],
                                                             self.mv_y_spatial_prior[me_num],
                                                             gaussian_encoder=self.em.gaussian_encoder)
-        mv_hat = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
+        mv_hat, mv_feature = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
 
         if stage_idx > 0 and me_downsample:
             for i in range(stage_idx):
@@ -505,17 +523,19 @@ class pMCTF(nn.Module):
 
         return {
             "mv_hat": mv_hat,
+            "mv_feature": mv_feature,
+            "mv_y_hat": mv_y_hat
         }
 
-    def encode_one_stage(self, ref_frame, cur_frame, code_lt, output_path=None,
+    def encode_one_stage(self, ref_frame, cur_frame, code_lt, dpb, output_path=None,
                          pic_width=None, pic_height=None, psize=128,
                          skip_decoding=False, stage_idx=0, q_index=0, me_downsample=False):
         ref_y, ref_chroma = ref_frame
         cur_y, cur_chroma = cur_frame
 
         if output_path is None:
-            result = self.forward_one_stage(ref_y, cur_y, q_index, code_lt, stage_idx=stage_idx, me_downsample=me_downsample)
-            result_c = self.forward_one_stage(ref_chroma, cur_chroma, q_index, code_lt,
+            result = self.forward_one_stage(ref_y, cur_y, q_index, code_lt, dpb,stage_idx=stage_idx, me_downsample=me_downsample)
+            result_c = self.forward_one_stage(ref_chroma, cur_chroma, q_index, code_lt, dpb,
                                               mv_hat=result["mv_hat"], stage_idx=stage_idx, me_downsample=me_downsample)
             ret_dict = {
                 "L_t": result["L_t"],
@@ -524,9 +544,14 @@ class pMCTF(nn.Module):
                 "H_tc": result_c["H_t"],
                 "bit_L": result["bit_L"] + result_c["bit_L"] if code_lt else None,
                 "bit_H": result["bit_H"] + result_c["bit_H"],
+                "bit_Lc": result_c["bit_L"] if code_lt else None,
+                "bit_Hc": result_c["bit_H"],
                 "bit_ME": result["bit_ME"],
                 "mv_hat": result["mv_hat"],
+                "dpb": {"mv_feature": result["mv_feature"],
+                        "ref_mv_y": result["ref_mv_y"]},
                 "decoding_time": 0,
+                "encoding_time": 0
             }
 
             return ret_dict
@@ -536,16 +561,16 @@ class pMCTF(nn.Module):
             mv_y_q_index = 0
 
             mv_out = output_path.replace('.bin', '_mv.bin')
-            out_enc = self.compress_mv(ref_y, cur_y, stage_idx=stage_idx, q_index=q_index, me_downsample=me_downsample)
+            out_enc = self.compress_mv(ref_y, cur_y, dpb, stage_idx=stage_idx, q_index=q_index, me_downsample=me_downsample)
             encode_p(out_enc['bit_stream'], mv_y_q_index, mv_out)
 
             mv_hat = out_enc["mv_hat"]
+            mv_feature = out_enc["mv_feature"]
+            mv_y_hat = out_enc["mv_y_hat"]
 
             # LUMA
             file_name = output_path
 
-            ref_chroma = ref_chroma.to("cpu")
-            cur_chroma = cur_chroma.to("cpu")
             del out_enc
             out_enc = self.compress_one_stage(ref_y, cur_y, code_lt, mv_hat, ischroma=False,
                                               sideinfo=[1, 1, pic_height, pic_width],
@@ -578,8 +603,10 @@ class pMCTF(nn.Module):
                 decoded = self.decompress_mv(string,
                                              ref_y.dtype,
                                              ref_y.size(2)/ds, ref_y.size(3)/ds,  # mv_hat has padded size
+                                             dpb,
                                              stage_idx=stage_idx, q_index=q_index)
                 mv_hat = decoded["mv_hat"]
+                mv_feature = decoded["mv_feature"]
 
                 out_dec = self.decompress_one_stage(file_name, code_lt, ischroma=False, psize=psize, q_index=q_index, stage_idx=stage_idx)
                 out_dec_c = self.decompress_one_stage(file_name_c, code_lt, ischroma=True, psize=psize, q_index=q_index, stage_idx=stage_idx)
@@ -602,8 +629,12 @@ class pMCTF(nn.Module):
                 "H_tc": H_tc_rec,
                 "bit_H": bits_H + bits_H_c,
                 "bit_L": bits_L + bits_L_c if code_lt else None,
+                "bit_Lc": bits_L_c if code_lt else None,
+                "bit_Hc": bits_H_c,
                 "bit_ME": bits_me,
                 "mv_hat": mv_hat,
+                "dpb": {"mv_feature": mv_feature,
+                        "ref_mv_y": mv_y_hat},
                 "decoding_time": decoding_time,
                 "encoding_time": encoding_time
             }
