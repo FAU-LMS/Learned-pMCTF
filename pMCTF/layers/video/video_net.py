@@ -55,19 +55,19 @@ def flow_warp(im, flow):
     return warp
 
 
-def bilinearupsacling(inputfeature):
+def bilinearupsacling(inputfeature, factor=2):
     inputheight = inputfeature.size()[2]
     inputwidth = inputfeature.size()[3]
     outfeature = F.interpolate(
-        inputfeature, (inputheight * 2, inputwidth * 2), mode='bilinear', align_corners=False)
+        inputfeature, (inputheight * factor, inputwidth * factor), mode='bilinear', align_corners=False)
     return outfeature
 
 
-def bilineardownsacling(inputfeature):
+def bilineardownsacling(inputfeature, factor=2):
     inputheight = inputfeature.size()[2]
     inputwidth = inputfeature.size()[3]
     outfeature = F.interpolate(
-        inputfeature, (inputheight // 2, inputwidth // 2), mode='bilinear', align_corners=False)
+        inputfeature, (inputheight // factor, inputwidth // factor), mode='bilinear', align_corners=False)
     return outfeature
 
 

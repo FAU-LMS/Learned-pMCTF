@@ -252,10 +252,9 @@ class pMCTF(nn.Module):
             mv_cur = cur_frame[0, :, :, :].tile((1, 3, 1, 1)) / self.dynamic_range
             mv_ref = ref_frame[0, :, :, :].tile((1, 3, 1, 1)) / self.dynamic_range
 
-        if stage_idx > 0 and me_downsample:
-            for i in range(stage_idx):
-                mv_cur = bilineardownsacling(mv_cur)
-                mv_ref = bilineardownsacling(mv_ref)
+        if me_downsample > 1:
+            mv_cur = bilineardownsacling(mv_cur, factor=me_downsample)
+            mv_ref = bilineardownsacling(mv_ref, factor=me_downsample)
 
         # ESTIMATE AND ENCODE+DECODE MOTION
         est_mv = self.optic_flow(mv_cur, mv_ref)  # MOTION ESTIMATION
@@ -272,9 +271,8 @@ class pMCTF(nn.Module):
 
         mv_hat, mv_feature  = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
 
-        if stage_idx > 0 and me_downsample:
-            for i in range(stage_idx):
-                mv_hat = bilinearupsacling(mv_hat) * 2
+        if me_downsample > 1:
+            mv_hat = bilinearupsacling(mv_hat, factor=me_downsample) * me_downsample
 
         if self.training:
             mv_y_for_bit = self.em.add_noise(mv_y_res)
@@ -455,10 +453,9 @@ class pMCTF(nn.Module):
         mv_x = cur_frame.tile((1, 3, 1, 1)) / self.dynamic_range
         mv_ref = ref_frame.tile((1, 3, 1, 1)) / self.dynamic_range
 
-        if stage_idx > 0 and me_downsample:
-            for i in range(stage_idx):
-                mv_x = bilineardownsacling(mv_x)
-                mv_ref = bilineardownsacling(mv_ref)
+        if me_downsample > 1:
+            mv_x = bilineardownsacling(mv_x, factor=me_downsample)
+            mv_ref = bilineardownsacling(mv_ref, factor=me_downsample)
 
         est_mv = self.optic_flow(mv_x, mv_ref)
 
@@ -475,9 +472,8 @@ class pMCTF(nn.Module):
 
         mv_hat, mv_feature = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
 
-        if stage_idx > 0 and me_downsample:
-            for i in range(stage_idx):
-                mv_hat = bilinearupsacling(mv_hat) * 2
+        if me_downsample > 1:
+            mv_hat = bilinearupsacling(mv_hat, factor=me_downsample) * me_downsample
 
         self.em.entropy_coder.reset()
         _ = self.mv_bit_est[me_num].encode(mv_z_hat)
@@ -517,9 +513,8 @@ class pMCTF(nn.Module):
                                                             gaussian_encoder=self.em.gaussian_encoder)
         mv_hat, mv_feature = self.mv_decoder[me_num](mv_y_hat, mv_y_q_dec)
 
-        if stage_idx > 0 and me_downsample:
-            for i in range(stage_idx):
-                mv_hat = bilinearupsacling(mv_hat) * 2
+        if me_downsample > 1:
+            mv_hat = bilinearupsacling(mv_hat, factor=me_downsample) * me_downsample
 
         return {
             "mv_hat": mv_hat,
@@ -529,7 +524,7 @@ class pMCTF(nn.Module):
 
     def encode_one_stage(self, ref_frame, cur_frame, code_lt, dpb, output_path=None,
                          pic_width=None, pic_height=None, psize=128,
-                         skip_decoding=False, stage_idx=0, q_index=0, me_downsample=False):
+                         skip_decoding=False, stage_idx=0, q_index=0, me_downsample=1):
         ref_y, ref_chroma = ref_frame
         cur_y, cur_chroma = cur_frame
 
