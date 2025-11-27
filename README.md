@@ -4,6 +4,9 @@ This repository contains training and inference code for the paper "Variable rat
 The paper is accepted for ICIP2025 and available on [Arxiv](https://arxiv.org/abs/2410.15873).
 
 To create the long-sequence Vimeo90K training set used in the paper, please refer to the instructions [here](create-dataset/README.md)
+
+The 32-frame Vimeo90K training set is also available for download (requires roughly 100 GB of disk space): <br> 
+[https://data.fau.de/public/66/21/352562166/vimeo-32.zip](https://data.fau.de/public/66/21/352562166/vimeo-32.zip) 
 ## Installation
 
 Setup conda environment and install Pytorch:
