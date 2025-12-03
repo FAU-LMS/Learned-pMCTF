@@ -236,7 +236,7 @@ def code_one_gop(video_net, pic_height, pic_width, args, device, gop_size, gop_i
 
             me_num = min(video_net.num_me_stages - 1, stage_idx)
 
-            ref_frame, cur_frame = video_net.inverse_MCTF(L_t, H_t, mv_hat)
+            ref_frame, cur_frame = video_net.inverse_MCTF(L_t, H_t, mv_hat, stage_idx=me_num)
             ref_frame_c, cur_frame_c = video_net.inverse_MCTF(L_tc, H_tc, mv_hat, stage_idx=me_num, downscale=True)
             frames_coded[frame_idx_gop] = [ref_frame, ref_frame_c, None]
             frames_coded[frame_idx_gop + group_step] = [cur_frame, cur_frame_c, None]
