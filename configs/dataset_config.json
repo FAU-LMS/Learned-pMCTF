@@ -39,6 +39,20 @@
                     "gop": 8
                 }
             }
+        },
+        "InStereo2K": {
+            "test": 1,
+            "base_path": "dataset",
+            "src_type": "stereo_png",
+            "_comment": "Set root_path to the project root (parent of dataset/) via --force_root_path, or update root_path above.",
+            "sequences": {
+                "Instereo2K_test": {
+                    "width": 512,
+                    "height": 512,
+                    "frames": 50,
+                    "gop": 2
+                }
+            }
         }
     }
 }

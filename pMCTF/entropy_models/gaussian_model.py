@@ -40,6 +40,7 @@ class CompressionModel(nn.Module):
 
     def get_y_gaussian_bits(self, y, sigma):
         mu = torch.zeros_like(sigma)
+        sigma = torch.nan_to_num(sigma, nan=1e-5, posinf=1e10, neginf=1e-5)
         sigma = sigma.clamp(1e-5, 1e10)
         gaussian = torch.distributions.normal.Normal(mu, sigma)
         probs = gaussian.cdf(y + 0.5) - gaussian.cdf(y - 0.5)
@@ -47,6 +48,7 @@ class CompressionModel(nn.Module):
 
     def get_y_laplace_bits(self, y, sigma):
         mu = torch.zeros_like(sigma)
+        sigma = torch.nan_to_num(sigma, nan=1e-5, posinf=1e10, neginf=1e-5)
         sigma = sigma.clamp(1e-5, 1e10)
         gaussian = torch.distributions.laplace.Laplace(mu, sigma)
         probs = gaussian.cdf(y + 0.5) - gaussian.cdf(y - 0.5)

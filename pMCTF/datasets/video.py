@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import warnings
 from pathlib import Path
 
 from PIL import Image
@@ -21,6 +22,13 @@ from torch.utils.data import Dataset
 from pMCTF.utils.util import rgb2ycbcr, rgb2yuv_lossless
 import random
 import glob
+
+
+def _is_instereo2k_root(root, split="train"):
+    """Return True if *root* follows the InStereo2K directory layout."""
+    sub = "train" if split == "train" else "valid"
+    p = Path(root) / sub
+    return (p / "left").is_dir() and (p / "right").is_dir()
 
 
 class VideoYCbCr(Dataset):
@@ -156,3 +164,143 @@ class VideoYCbCr(Dataset):
         return img
 
 
+class InStereo2KVideoDataset(Dataset):
+    """Load InStereo2K stereo pairs as 2-frame video sequences (GOP = 2).
+
+    Each stereo pair (left image, right image) is treated as a 2-frame video
+    clip, so the dataset is always used with ``num_frames=2`` and
+    ``num_me_stages=1``.  The class exposes the same update/callback interface
+    as ``VideoYCbCr`` so that ``train_pMCTF_L.py`` can call
+    ``dataset.update_num_frames(…)`` etc. without crashing.
+
+    Directory layout expected at *root*::
+
+        root/
+            train/
+                left/   (e.g. Instereo2K_0.png, …)
+                right/  (e.g. Instereo2K_0.png, …)
+            valid/
+                left/
+                right/
+
+    Args:
+        root (str | Path): root dataset directory.
+        split (str): ``"train"`` or ``"valid"``/``"test"``.
+        transform (callable): torchvision transform applied to the stacked
+            ``[H, W, 6]`` RGB array (ToTensor + RandomCrop).
+        lossless (bool): use integer-to-integer YUV conversion (default: False).
+        num_frames (int): ignored – always 2 for stereo pairs.
+    """
+
+    def __init__(self, root, split="train", transform=None, lossless=False,
+                 num_frames=2, **kwargs):
+        # --- compatibility attributes expected by train_pMCTF_L.py ---
+        self.num_frames = 2
+        self.num_frames_max = 2
+        self.max_interval = 1
+        self.rnd_interval = False
+        self.use_idx_list = False
+        self.rnd_temp_order = False
+        self.current_interval = 1
+        self.frame_ids_curr = None
+        self.lossless = lossless
+        self.transform = transform
+
+        if split == "train":
+            data_dir = Path(root) / "train"
+        else:
+            data_dir = Path(root) / "valid"
+
+        left_dir = data_dir / "left"
+        right_dir = data_dir / "right"
+
+        if not left_dir.is_dir() or not right_dir.is_dir():
+            raise RuntimeError(
+                f'InStereo2K dataset not found at "{data_dir}". '
+                "Expected sub-directories left/ and right/."
+            )
+
+        left_images = sorted(left_dir.glob("*.png"))
+        right_images = sorted(right_dir.glob("*.png"))
+        assert len(left_images) == len(right_images), (
+            f"Mismatched image counts: left={len(left_images)}, right={len(right_images)}"
+        )
+
+        self.sample_pairs = list(zip(left_images, right_images))
+
+        if split in ("valid", "test"):
+            self.sample_pairs = self.sample_pairs[: min(len(self.sample_pairs), 10)]
+
+    # ------------------------------------------------------------------
+    # Compatibility stubs – VideoYCbCr interface used by train_pMCTF_L.py
+    # ------------------------------------------------------------------
+
+    def update_num_frames(self, num_frames, logger):
+        """InStereo2K is always GOP-2; num_frames update is silently ignored."""
+        logger.info(
+            "InStereo2K dataset: ignoring update_num_frames – keeping num_frames=2 (stereo pair)."
+        )
+
+    def update_interval(self, max_interval, logger):
+        """No frame-interval concept for stereo pairs."""
+        logger.info(
+            "InStereo2K dataset: frame interval not applicable (stereo pairs are always consecutive)."
+        )
+
+    def set_current_interval(self):
+        return 1
+
+    def use_random_interval(self):
+        pass  # no-op
+
+    def set_random_frame_num(self):
+        pass  # no-op
+
+    def get_frame_ids(self):
+        return 1
+
+    # ------------------------------------------------------------------
+
+    def __len__(self):
+        return len(self.sample_pairs)
+
+    def __getitem__(self, index):
+        # Be robust to occasional corrupted/truncated PNG files.
+        # Retry with another stereo pair instead of crashing the DataLoader.
+        max_retry = 8
+        cur_index = index
+        for retry in range(max_retry):
+            left_path, right_path = self.sample_pairs[cur_index]
+            try:
+                left_img = self._load_img(left_path)    # [H, W, 3] float32 RGB
+                right_img = self._load_img(right_path)  # [H, W, 3] float32 RGB
+
+                # Stack along channel dim → [H, W, 6], then apply joint transform
+                frames = np.concatenate([left_img, right_img], axis=-1)
+                frames = self.transform(frames)                    # [6, H_crop, W_crop]
+                frames = torch.chunk(frames, chunks=2, dim=0)     # tuple of [3, H_crop, W_crop]
+
+                if self.lossless:
+                    frames = [rgb2yuv_lossless(img) for img in frames]
+                else:
+                    frames = [rgb2ycbcr(img) for img in frames]
+
+                return frames
+            except (OSError, ValueError) as exc:
+                if retry == 0:
+                    warnings.warn(
+                        f"InStereo2KVideoDataset: failed to read stereo pair "
+                        f"('{left_path}', '{right_path}'): {exc}. "
+                        "Skipping this sample and retrying with another one."
+                    )
+                cur_index = random.randint(0, len(self.sample_pairs) - 1)
+
+        raise RuntimeError(
+            f"InStereo2KVideoDataset: failed to read stereo pair after {max_retry} retries. "
+            f"Last attempted files: '{left_path}', '{right_path}'"
+        )
+
+    def _load_img(self, p):
+        with Image.open(p) as img_file:
+            img = np.asarray(img_file.convert("RGB"), dtype=np.float32)
+        return img

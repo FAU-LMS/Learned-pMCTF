@@ -17,6 +17,7 @@ from pMCTF.models.video.pMCTF_L import pMCTF
 from pMCTF.utils.video_eval_utils import str2bool, create_folder, generate_log_json, dump_json
 from pMCTF.utils.stream_helper import get_padding_size, get_state_dict
 from pMCTF.utils.yuv_reader import YUVReader
+from pMCTF.utils.stereo_reader import StereoImageReader
 from pMCTF.utils.util import ycbcr2rgb, yuv_420_to_444
 from pytorch_msssim import ms_ssim
 
@@ -54,6 +55,8 @@ def parse_args(argv):
     parser.add_argument('--num_me_stages', default=1, type=int, help="Number of ME/MC options")
     parser.add_argument("--q_index_num", default=1, type=int, help="Specify number of q_indices (default: %(default)s)")
     parser.add_argument("--q_index", default=-1, type=int, help="Test one specific q_index only (default: %(default)s)")
+    parser.add_argument("--strict_load", type=str2bool, nargs='?', const=True, default=False,
+                        help="Strict state dict loading (fail on mismatched keys). Default: False (loose loading)")
 
     args = parser.parse_args(argv)
     return args
@@ -110,7 +113,10 @@ def run_test(video_net, args, device):
 
     print("CODING ", args['vid_path'])
 
-    src_reader = YUVReader(args['vid_path'], args['src_width'], args['src_height'], start_index=start_frame)
+    if args.get('src_type') == 'stereo_png':
+        src_reader = StereoImageReader(args['vid_path'], start_index=start_frame)
+    else:
+        src_reader = YUVReader(args['vid_path'], args['src_width'], args['src_height'], start_index=start_frame)
 
     frame_types = [None] * frame_num
     psnrs = [None] * frame_num
@@ -362,7 +368,8 @@ def encode_one(args, device):
 
     video_net = pMCTF(lossy=not args["lossless"], num_me_stages=args["num_me_stages"])
 
-    video_net.load_state_dict(p_state_dict, strict=True)
+    strict = args.get('strict_load', False)
+    video_net.load_state_dict(p_state_dict, strict=strict)
     video_net = video_net.to(device)
     video_net.eval()
 
@@ -384,7 +391,12 @@ def encode_one(args, device):
     else:
         decoded_frame_folder = None
     img_path = os.path.join(args['dataset_path'], sub_dir_name)
-    args['vid_path'] = img_path + ".yuv"
+    if args.get('src_type') == 'stereo_png':
+        # For InStereo2K: vid_path is the directory (left/ and right/ inside it),
+        # not a .yuv file.
+        args['vid_path'] = img_path
+    else:
+        args['vid_path'] = img_path + ".yuv"
     args['gop_size'] = gop_size
     args['frame_num'] = frame_num
     args['bin_folder'] = bin_folder
@@ -492,6 +504,7 @@ def main(argv):
                 cur_args["two_stage_me"] = args.two_stage_me
                 cur_args["skip_decoding"] = args.skip_decoding
                 cur_args["last_frames"] = args.last_frames
+                cur_args["strict_load"] = args.strict_load
 
                 count_frames += cur_args['frame_num']
 

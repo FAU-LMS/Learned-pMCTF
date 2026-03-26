@@ -29,6 +29,7 @@
 
 
 import random
+import warnings
 
 from pathlib import Path
 
@@ -38,6 +39,13 @@ import torch
 from PIL import Image
 from pMCTF.utils.util import rgb2ycbcr, ycbcr2rgb
 from torch.utils.data import Dataset
+
+
+def _is_instereo2k_root(root, split="train"):
+    """Return True if *root* follows the InStereo2K directory layout."""
+    sub = "train" if split == "train" else "valid"
+    p = Path(root) / sub
+    return (p / "left").is_dir() and (p / "right").is_dir()
 
 
 class VideoFolder(Dataset):
@@ -150,3 +158,88 @@ class VideoFolder(Dataset):
         tuplet_prefix = {3: "tri", 7: "sep"}[tuplet]
         list_suffix = {"train": "trainlist", "valid": "testlist", "test": "testlist"}[split]
         return f"{tuplet_prefix}_{list_suffix}.txt"
+
+
+class InStereo2KFolder(Dataset):
+    """Load InStereo2K dataset as individual image samples for image-codec training.
+
+    Directory layout expected at *root*::
+
+        root/
+            train/
+                left/   (e.g. Instereo2K_0.png, …)
+                right/  (e.g. Instereo2K_0.png, …)
+            valid/
+                left/
+                right/
+
+    Each left **and** right image is treated as an independent training sample
+    (Y-channel only, matching the Vimeo-based ``VideoFolder`` with
+    ``max_frames=1``).  This makes the class a drop-in replacement for
+    ``VideoFolder`` when the dataset is InStereo2K.
+
+    Args:
+        root (str | Path): root dataset directory containing ``train/`` and
+            ``valid/`` sub-directories.
+        transform (callable): a function / transform that takes in a numpy
+            ``[H, W, 1]`` array and returns a transformed tensor.
+        split (str): ``"train"`` or ``"valid"``/``"test"``.
+        rgb (bool): if *True* keep all three RGB channels; otherwise keep Y
+            channel only (default: False).
+    """
+
+    def __init__(self, root, transform=None, split="train", rgb=False):
+        if transform is None:
+            raise RuntimeError("Transform must be applied")
+
+        if split == "train":
+            data_dir = Path(root) / "train"
+        else:
+            data_dir = Path(root) / "valid"
+
+        left_dir = data_dir / "left"
+        right_dir = data_dir / "right"
+
+        if not left_dir.is_dir() or not right_dir.is_dir():
+            raise RuntimeError(
+                f'InStereo2K dataset not found at "{data_dir}". '
+                "Expected sub-directories left/ and right/."
+            )
+
+        self.samples = sorted(left_dir.glob("*.png")) + sorted(right_dir.glob("*.png"))
+
+        if split in ("valid", "test"):
+            self.samples = self.samples[: min(len(self.samples), 100)]
+
+        self.transform = transform
+        self.rgb = rgb
+
+    def __getitem__(self, index):
+        # Be robust to occasional corrupted/truncated PNG files.
+        # Retry with another sample instead of crashing the whole DataLoader.
+        max_retry = 8
+        cur_index = index
+        for retry in range(max_retry):
+            p = self.samples[cur_index]
+            try:
+                img = np.asarray(Image.open(p).convert("RGB"), dtype=np.float32)
+                if not self.rgb:
+                    img = rgb2ycbcr(img)          # [H, W, 3]  YCbCr
+                    img = img[:, :, 0:1]          # [H, W, 1]  Y channel only
+                img = self.transform(img)         # ToTensor + crop → [1, H_crop, W_crop]
+                return img
+            except (OSError, ValueError) as exc:
+                if retry == 0:
+                    warnings.warn(
+                        f"InStereo2KFolder: failed to read image '{p}': {exc}. "
+                        "Skipping this sample and retrying with another one."
+                    )
+                cur_index = random.randint(0, len(self.samples) - 1)
+
+        raise RuntimeError(
+            f"InStereo2KFolder: failed to read image after {max_retry} retries. "
+            f"Last attempted file: '{self.samples[cur_index]}'"
+        )
+
+    def __len__(self):
+        return len(self.samples)

@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 import sys
 import json
 
-from pMCTF.datasets.video import VideoYCbCr
+from pMCTF.datasets.video import VideoYCbCr, InStereo2KVideoDataset, _is_instereo2k_root
 from torchvision import transforms
 from pMCTF.utils.logger import init_loggers
 
@@ -60,14 +60,28 @@ def adjust_learning_rate(optimizer, lr):
         param_group['lr'] = lr
 
 
-def load_datasets(args, device, logger):
-    tuplet=7
+def load_datasets(args, device, logger, num_frames=None):
+    tuplet = 7
     train_transforms = transforms.Compose([transforms.ToTensor(), transforms.RandomCrop(args.patchsize)])
 
-    train_dataset = VideoYCbCr(args.dataset, split="train", transform=train_transforms, lossless=args.lossless,
-                               num_frames=args.num_frame_list[0])
+    if _is_instereo2k_root(args.dataset, split="train"):
+        # InStereo2K: stereo pairs treated as 2-frame video (GOP=2, num_me_stages=1).
+        train_dataset = InStereo2KVideoDataset(
+            args.dataset, split="train", transform=train_transforms, lossless=args.lossless
+        )
+        logger.info(
+            f"InStereo2K training dataset: {len(train_dataset)} stereo pairs (always GOP=2)."
+        )
+    else:
+        train_dataset = VideoYCbCr(
+            args.dataset, split="train", transform=train_transforms,
+            lossless=args.lossless,
+            num_frames=args.num_frame_list[0] if num_frames is None else num_frames,
+        )
+        logger.info(
+            f"Training dataset consisting of {len(train_dataset)} videos with {tuplet} images each."
+        )
 
-    logger.info(f"Training dataset consisting of {len(train_dataset)} videos with {tuplet} images each.")
     train_loader = DataLoader(dataset=train_dataset,
                               batch_size=args.batch_size,
                               shuffle=True,
@@ -93,7 +107,8 @@ def train(video_net: nn.Module,
           global_step: int,
           num_frames: int,
           max_interval: int = 1,
-          logger=None):
+          logger=None,
+          update_freq: int = 1):
 
     num_stages_tmp = 1
     while 2**num_stages_tmp < num_frames:
@@ -130,6 +145,7 @@ def train(video_net: nn.Module,
 
     t0 = datetime.datetime.now()
 
+    optimizer.zero_grad()  # zero once at the start (accumulation-aware)
     if random_interval:
         train_loader.dataset.use_random_interval()
         current_interval = train_loader.dataset.set_current_interval()
@@ -244,11 +260,13 @@ def train(video_net: nn.Module,
                     log_dict["psnr_H"] += (20 * np.log10(255.0) - 10 * torch.log10(d_latent)) / (num_frames - 1)
                     log_dict["warp_psnr"] += (20 * np.log10(255.0) - 10 * torch.log10(result["me_mse"])) / (num_frames - 1)
                 log_dict["rd_loss"] += rd_loss / (num_frames - 1)
-        optimizer.zero_grad()
-        rd_loss.backward()
+        # Gradient accumulation: scale loss, accumulate, step every update_freq batches
+        (rd_loss / update_freq).backward()
 
-        torch.nn.utils.clip_grad_norm_(video_net.parameters(), 5.0)
-        optimizer.step()
+        if (batch_idx + 1) % update_freq == 0 or (batch_idx + 1) == len(train_loader):
+            torch.nn.utils.clip_grad_norm_(video_net.parameters(), 5.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
         # compute statistics every cal_step (10) steps
         if global_step % cal_step == 0:
@@ -288,7 +306,7 @@ def parse_args(argv):
     parser.add_argument("-d", "--dataset", type=str, required=True, help="Training dataset path")
     parser.add_argument('--iframe_path', type=str, required=True,
                         help='Path to I frame model pWave++')
-    parser.add_argument('--config', type=str, default="configs/train_mctf_gop16.json",
+    parser.add_argument('--config', type=str, default="configs/train_mctf_stereo.json",
                         help='path to config helper file')
     parser.add_argument('--checkpoint', default=None,
                         help='load pretrained model from checkpoint path')
@@ -314,6 +332,9 @@ def parse_args(argv):
     parser.add_argument('--num_me_stages', default=2, type=int,
                         help="Number of temporal decomposition levels for which dedicated ME/MC "
                              "networks are available")
+    parser.add_argument('--update_freq', default=1, type=int,
+                        help="Gradient accumulation steps – effective batch = batch_size × update_freq "
+                             "(default: %(default)s)")
 
     args = parser.parse_args(argv)
     return args
@@ -356,6 +377,9 @@ def main(argv):
 
     logger.info(f'Loading I frame model {args.iframe_path}')
     i_frame_state_dict = torch.load(args.iframe_path, map_location=device)
+    # train_pWave.py saves checkpoints as {"epoch": …, "state_dict": …, …}
+    if "state_dict" in i_frame_state_dict:
+        i_frame_state_dict = i_frame_state_dict["state_dict"]
 
     train_loader = load_datasets(args, device, logger)
 
@@ -429,7 +453,11 @@ def main(argv):
                         video_net.make_all_trainable()
                     if (args.parts[stage_num] == args.parts[stage_num-1] or epochs_cur_stage > 0) \
                         and "optimizer" in checkpoint and start_epoch < 15:
-                        optimizer.load_state_dict(checkpoint["optimizer"])
+                        try:
+                            optimizer.load_state_dict(checkpoint["optimizer"])
+                        except (ValueError, KeyError) as e:
+                            logger.warning(f"Skipping optimizer state restore (incompatible groups – "
+                                           f"checkpoint may have used different num_me_stages): {e}")
                     adjust_learning_rate(optimizer, args.lr_list[stage_num])
                     break
     else:
@@ -508,7 +536,8 @@ def main(argv):
                             epoch, global_step,
                             args.num_frame_list[stage_num],
                             args.frame_interval[stage_num],
-                            logger)
+                            logger,
+                            update_freq=args.update_freq)
 
         epochs_cur_stage += 1
 

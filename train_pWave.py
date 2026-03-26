@@ -14,7 +14,7 @@ from torchvision import transforms
 import torch.backends.cudnn as cudnn
 import os.path as osp
 
-from pMCTF.datasets.image import VideoFolder
+from pMCTF.datasets.image import VideoFolder, InStereo2KFolder, _is_instereo2k_root
 from pMCTF.utils.logger import get_root_logger, get_env_info, dict2str
 from optim_factory import configure_optimizers, AverageMeter
 from pMCTF.utils.visualizer import Visualizer
@@ -57,6 +57,7 @@ def train_one_epoch(
     log_freq = math.ceil(len(train_dataloader)/50)
 
     q_index_num = model.get_qp_num()
+    optimizer.zero_grad()
 
     for data_iter_step, d in enumerate(train_dataloader):
         step = data_iter_step // update_freq
@@ -79,10 +80,17 @@ def train_one_epoch(
         if not model.lossy:
             d = torch.round(d)
 
-        optimizer.zero_grad()
-
         out_net = model(d, q_index)
         out_criterion = model.compute_loss(out_net, d, cur_lmbda)
+
+        if not torch.isfinite(out_criterion["loss"]):
+            logger.warning(
+                f"Skip non-finite loss at epoch {epoch}, iter {data_iter_step}: "
+                f"loss={out_criterion['loss'].item()}, bpp={out_criterion['bpp'].item()}, "
+                f"mse={out_criterion['mse'].item()}"
+            )
+            optimizer.zero_grad()
+            continue
 
         out_criterion["loss"] /= update_freq
         out_criterion["loss"].backward()
@@ -92,6 +100,7 @@ def train_one_epoch(
 
         if (data_iter_step + 1) % update_freq == 0:
             optimizer.step()
+            optimizer.zero_grad()
 
         if data_iter_step % log_freq == 0:
             out_info = f"Train epoch {epoch}: [ " \
@@ -188,8 +197,15 @@ def load_datasets(args, device):
     )
 
     args.dataset = args.dataset[0]
-    train_dataset = VideoFolder(args.dataset, split="train", transform=train_transforms, max_frames=1)
-    test_dataset = VideoFolder(args.dataset, split="valid", transform=test_transforms, max_frames=1)
+
+    if _is_instereo2k_root(args.dataset, split="train"):
+        # InStereo2K: flat left/ right/ image pairs – each image is one sample.
+        train_dataset = InStereo2KFolder(args.dataset, split="train", transform=train_transforms)
+        test_dataset = InStereo2KFolder(args.dataset, split="valid", transform=test_transforms)
+    else:
+        # Vimeo septuplet (default)
+        train_dataset = VideoFolder(args.dataset, split="train", transform=train_transforms, max_frames=1)
+        test_dataset = VideoFolder(args.dataset, split="valid", transform=test_transforms, max_frames=1)
 
     train_dataloader = DataLoader(
         train_dataset,
